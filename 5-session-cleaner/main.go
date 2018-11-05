@@ -20,24 +20,46 @@ package main
 import (
 	"errors"
 	"log"
+	"sync"
+	"time"
 )
 
 // SessionManager keeps track of all sessions from creation, updating
 // to destroying.
 type SessionManager struct {
-	sessions map[string]Session
+	sessions map[string]*Session
+	sync.RWMutex
 }
 
 // Session stores the session's data
 type Session struct {
-	Data map[string]interface{}
+	Uptime int
+	Data   map[string]interface{}
+}
+
+// Janitor removes idle sessions from SessionManager
+func (m *SessionManager) Janitor(interval int) {
+	t := time.Tick(time.Duration(interval) * time.Second)
+	for {
+		<-t
+		m.Lock()
+		for k, v := range m.sessions {
+			m.sessions[k].Uptime = m.sessions[k].Uptime + 1
+			if v.Uptime > 5 {
+				delete(m.sessions, k)
+			}
+		}
+		m.Unlock()
+	}
 }
 
 // NewSessionManager creates a new sessionManager
 func NewSessionManager() *SessionManager {
 	m := &SessionManager{
-		sessions: make(map[string]Session),
+		sessions: make(map[string]*Session),
 	}
+
+	go m.Janitor(1)
 
 	return m
 }
@@ -49,9 +71,7 @@ func (m *SessionManager) CreateSession() (string, error) {
 		return "", err
 	}
 
-	m.sessions[sessionID] = Session{
-		Data: make(map[string]interface{}),
-	}
+	m.updateSessionData(sessionID, make(map[string]interface{}))
 
 	return sessionID, nil
 }
@@ -63,7 +83,9 @@ var ErrSessionNotFound = errors.New("SessionID does not exists")
 // GetSessionData returns data related to session if sessionID is
 // found, errors otherwise
 func (m *SessionManager) GetSessionData(sessionID string) (map[string]interface{}, error) {
+	m.RLock()
 	session, ok := m.sessions[sessionID]
+	m.RUnlock()
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
@@ -72,22 +94,28 @@ func (m *SessionManager) GetSessionData(sessionID string) (map[string]interface{
 
 // UpdateSessionData overwrites the old session data with the new one
 func (m *SessionManager) UpdateSessionData(sessionID string, data map[string]interface{}) error {
-	_, ok := m.sessions[sessionID]
-	if !ok {
-		return ErrSessionNotFound
+	_, err := m.GetSessionData(sessionID)
+	if err != nil {
+		return err
 	}
 
-	// Hint: you should renew expiry of the session here
-	m.sessions[sessionID] = Session{
-		Data: data,
-	}
-
+	m.updateSessionData(sessionID, data)
 	return nil
+}
+
+func (m *SessionManager) updateSessionData(sessionID string, data map[string]interface{}) {
+	m.Lock()
+	m.sessions[sessionID] = &Session{
+		Data:   data,
+		Uptime: 0,
+	}
+	m.Unlock()
 }
 
 func main() {
 	// Create new sessionManager and new session
 	m := NewSessionManager()
+
 	sID, err := m.CreateSession()
 	if err != nil {
 		log.Fatal(err)
